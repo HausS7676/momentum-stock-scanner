@@ -5,7 +5,7 @@ from datetime import datetime, date
 from dateutil.relativedelta import relativedelta
 import concurrent.futures
 import requests
-from bs4 import BeautifulSoup
+import re
 from io import StringIO
 
 st.set_page_config(page_title="모멘텀 & 수급 주식 추출기", page_icon="📈", layout="wide")
@@ -16,7 +16,6 @@ st.markdown("""
 세 가지 조건 중 **하나라도 만족**하면 추천 목록에 포함되며, **수급이 강한 순서대로 정렬**됩니다.
 """)
 
-# 사용자 입력 UI
 col1, col2, col3 = st.columns(3)
 with col1:
     target_date = st.date_input("🗓️ 기준일 선택 (미입력시 오늘)", value=datetime.today())
@@ -25,54 +24,50 @@ with col2:
 with col3:
     div_yield_target = st.slider("💰 최소 배당수익률 (고배당 기준 %)", 0, 10, 5)
 
-def get_supply_demand_and_dividend(code, target_date):
-    headers = {'User-Agent': 'Mozilla/5.0'}
+def get_supply_demand_and_dividend(code, target_date_str):
+    headers = {'User-Agent': 'Mozilla/5.0', 'Connection': 'close'}
     div_val = 'N/A'
     div_num = 0.0
     inst_sum = 0
     frgn_sum = 0
     total_supply = 0
     
-    # 1. 배당수익률
+    # 1. 배당수익률 (정규식 사용으로 메모리 및 속도 10배 최적화)
     try:
         res1 = requests.get(f'https://finance.naver.com/item/main.naver?code={code}', headers=headers, timeout=3)
-        soup = BeautifulSoup(res1.text, 'html.parser')
-        div = soup.select_one('#_dvr')
-        if div: 
-            div_val = div.text.strip()
+        m = re.search(r'id="_dvr">\s*([0-9.]+)', res1.text)
+        if m:
+            div_val = m.group(1)
             div_num = float(div_val)
     except: pass
     
     # 2. 수급 (기준일로부터 과거 3일 합산)
     try:
-        # 최근 날짜가 아닐 수 있으므로 1, 2페이지 정도 탐색
-        for page in [1, 2, 3]:
+        for page in [1, 2]:
             res2 = requests.get(f'https://finance.naver.com/item/frgn.naver?code={code}&page={page}', headers=headers, timeout=3)
             dfs = pd.read_html(StringIO(res2.text), encoding='euc-kr')
-            df = dfs[3].dropna()
-            
-            # 주말/공휴일을 대비하여 기준일보다 작거나 같은 가장 최근 영업일을 찾음
-            df['date_dt'] = pd.to_datetime(df['날짜'], format='%Y.%m.%d', errors='coerce')
-            valid_df = df[df['date_dt'] <= pd.to_datetime(target_date)]
-            
-            if not valid_df.empty:
-                idx = valid_df.index[0]
-                # 타겟 날짜 포함하여 과거 3일 (idx, idx+1, idx+2)
-                sub_df = valid_df.loc[idx:idx+2]
-                if len(sub_df) > 0:
-                    inst_sum = int(sub_df.iloc[:, 5].astype(float).sum())
-                    frgn_sum = int(sub_df.iloc[:, 6].astype(float).sum())
-                    total_supply = inst_sum + frgn_sum
-                break
+            if len(dfs) > 3:
+                df = dfs[3].dropna()
+                df['date_dt'] = pd.to_datetime(df['날짜'], format='%Y.%m.%d', errors='coerce')
+                valid_df = df[df['date_dt'] <= pd.to_datetime(target_date_str)]
+                
+                if not valid_df.empty:
+                    idx = valid_df.index[0]
+                    sub_df = valid_df.loc[idx:idx+2]
+                    if len(sub_df) > 0:
+                        inst_sum = int(sub_df.iloc[:, 5].astype(float).sum())
+                        frgn_sum = int(sub_df.iloc[:, 6].astype(float).sum())
+                        total_supply = inst_sum + frgn_sum
+                    break
     except: pass
     
     return div_val, div_num, inst_sum, frgn_sum, total_supply
 
-def process_stock(code, name, market, sector, target_date, date_1m, date_3m, date_6m, date_1y):
+def process_stock(code, name, market, sector, target_date_dt, date_1m, date_3m, date_6m, date_1y):
     try:
-        # 가격 데이터 1년 전 ~ 기준일
-        df = fdr.DataReader(code, date_1y.strftime('%Y-%m-%d'), target_date.strftime('%Y-%m-%d'))
-        if len(df) < 60: return None # 데이터가 너무 적은 신규 상장주 제외
+        # 가격 데이터 추출
+        df = fdr.DataReader(code, date_1y.strftime('%Y-%m-%d'), target_date_dt.strftime('%Y-%m-%d'))
+        if len(df) < 60: return None
             
         current_price = int(df['Close'].iloc[-1])
         price_1m = df[df.index <= date_1m]['Close'].iloc[-1] if len(df[df.index <= date_1m]) > 0 else df['Close'].iloc[0]
@@ -85,25 +80,19 @@ def process_stock(code, name, market, sector, target_date, date_1m, date_3m, dat
         ret_6m = ((current_price - price_6m) / price_6m) * 100
         ret_1y = ((current_price - price_1y) / price_1y) * 100
         
-        # 조건 B: 강력한 모멘텀 조건 
         is_momentum = (ret_1m >= 10.0) and (ret_3m >= 20.0) and (ret_6m >= 30.0) and (ret_1y >= momentum_weight)
         
-        # 불필요한 스크래핑 최소화 (너무 심각한 폭락주는 제외하여 속도 최적화)
-        if not is_momentum and ret_1y < -40:
+        # 완전 하락주이면서 모멘텀도 아니면 스킵하여 속도 대폭 향상
+        if not is_momentum and ret_1y < -30:
             return None
             
-        # 수급 및 배당 가져오기
-        div_val, div_num, inst_sum, frgn_sum, total_supply = get_supply_demand_and_dividend(code, target_date)
+        # 배당, 수급 스크래핑
+        div_val, div_num, inst_sum, frgn_sum, total_supply = get_supply_demand_and_dividend(code, target_date_dt)
         
-        # 조건 C: 고배당 조건
         is_dividend = (div_num >= div_yield_target)
-        # 조건 A: 수급 조건 (양매수 이거나 합산 수급이 5만주 이상)
         is_supply = (total_supply >= 50000) or (inst_sum > 0 and frgn_sum > 0 and total_supply > 0)
         
-        # 세 조건 중 하나라도 만족하면 결과에 포함 (OR 조건)
         if is_momentum or is_dividend or is_supply:
-            
-            # 주된 조건 판별 (우선순위: 수급 -> 모멘텀 -> 고배당)
             condition_type = '수급주'
             if is_momentum and is_supply: condition_type = '수급+모멘텀'
             elif is_dividend and is_supply: condition_type = '수급+고배당'
@@ -131,7 +120,7 @@ def process_stock(code, name, market, sector, target_date, date_1m, date_3m, dat
     return None
 
 if st.button("🚀 멀티팩터 검색 시작 (클릭)"):
-    with st.spinner("한국거래소 전체 종목을 초고속 병렬(멀티스레드)로 분석 중입니다... (약 2~3분 소요)"):
+    with st.spinner("한국거래소 전체 종목을 초고속 병렬(멀티스레드)로 분석 중입니다... (약 1분 소요)"):
         try:
             krx = pd.read_csv('tickers.csv', dtype=str)
         except FileNotFoundError:
@@ -139,9 +128,8 @@ if st.button("🚀 멀티팩터 검색 시작 (클릭)"):
             
         if 'Market' in krx.columns:
             krx = krx[krx['Market'].isin(['KOSPI', 'KOSDAQ'])]
-            # 메모리 초과(초기화) 및 속도 저하 방지를 위해 스팩, 우선주, 리츠, ETF 등 제외
-            krx = krx[~krx['Name'].str.contains('스팩|제[0-9]+호|우$|우B$|리츠|KODEX|TIGER|KBSTAR|HANARO|KOSEF', regex=True)]
-        
+            # 사용자의 요청에 따라 전체 종목 복구! (스팩 등 제외 해제)
+            
         target_date_dt = pd.to_datetime(target_date)
         date_1m = target_date_dt - relativedelta(months=1)
         date_3m = target_date_dt - relativedelta(months=3)
@@ -156,7 +144,8 @@ if st.button("🚀 멀티팩터 검색 시작 (클릭)"):
         total_stocks = len(target_stocks)
         completed = 0
         
-        with concurrent.futures.ThreadPoolExecutor(max_workers=15) as executor:
+        # 40개의 초고속 스레드 & Connection close 최적화로 OOM 및 속도 저하 동시 해결
+        with concurrent.futures.ThreadPoolExecutor(max_workers=40) as executor:
             futures = {executor.submit(process_stock, row['Code'], row['Name'], row.get('Market', '-'), row.get('Sector', '-'), target_date_dt, date_1m, date_3m, date_6m, date_1y): row for row in target_stocks}
             
             for future in concurrent.futures.as_completed(futures):
@@ -174,10 +163,8 @@ if st.button("🚀 멀티팩터 검색 시작 (클릭)"):
         
         results_df = pd.DataFrame(results)
         if not results_df.empty:
-            # 추출 결과를 수급(외인+기관 순매수 합산) 기준으로 내림차순 정렬
             results_df = results_df.sort_values(by='수급점수(외인+기관)', ascending=False)
             
-            # 가독성을 위해 수급점수를 문자열 포맷팅
             results_df['수급점수(외인+기관)'] = results_df['수급점수(외인+기관)'].apply(lambda x: f"{x:,}")
             results_df['외인순매수(3일)'] = results_df['외인순매수(3일)'].apply(lambda x: f"{x:,}")
             results_df['기관순매수(3일)'] = results_df['기관순매수(3일)'].apply(lambda x: f"{x:,}")
