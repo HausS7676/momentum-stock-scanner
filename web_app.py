@@ -139,6 +139,8 @@ if st.button("🚀 멀티팩터 검색 시작 (클릭)"):
             
         if 'Market' in krx.columns:
             krx = krx[krx['Market'].isin(['KOSPI', 'KOSDAQ'])]
+            # 메모리 초과(초기화) 및 속도 저하 방지를 위해 스팩, 우선주, 리츠, ETF 등 제외
+            krx = krx[~krx['Name'].str.contains('스팩|제[0-9]+호|우$|우B$|리츠|KODEX|TIGER|KBSTAR|HANARO|KOSEF', regex=True)]
         
         target_date_dt = pd.to_datetime(target_date)
         date_1m = target_date_dt - relativedelta(months=1)
@@ -154,7 +156,7 @@ if st.button("🚀 멀티팩터 검색 시작 (클릭)"):
         total_stocks = len(target_stocks)
         completed = 0
         
-        with concurrent.futures.ThreadPoolExecutor(max_workers=30) as executor:
+        with concurrent.futures.ThreadPoolExecutor(max_workers=15) as executor:
             futures = {executor.submit(process_stock, row['Code'], row['Name'], row.get('Market', '-'), row.get('Sector', '-'), target_date_dt, date_1m, date_3m, date_6m, date_1y): row for row in target_stocks}
             
             for future in concurrent.futures.as_completed(futures):
