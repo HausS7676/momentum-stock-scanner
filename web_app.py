@@ -140,10 +140,11 @@ if st.button("🚀 멀티팩터 검색 시작 (클릭)"):
         if 'Market' in krx.columns:
             krx = krx[krx['Market'].isin(['KOSPI', 'KOSDAQ'])]
         
-        date_1m = target_date - relativedelta(months=1)
-        date_3m = target_date - relativedelta(months=3)
-        date_6m = target_date - relativedelta(months=6)
-        date_1y = target_date - relativedelta(years=1)
+        target_date_dt = pd.to_datetime(target_date)
+        date_1m = target_date_dt - relativedelta(months=1)
+        date_3m = target_date_dt - relativedelta(months=3)
+        date_6m = target_date_dt - relativedelta(months=6)
+        date_1y = target_date_dt - relativedelta(years=1)
         
         progress_bar = st.progress(0)
         status_text = st.empty()
@@ -154,7 +155,7 @@ if st.button("🚀 멀티팩터 검색 시작 (클릭)"):
         completed = 0
         
         with concurrent.futures.ThreadPoolExecutor(max_workers=30) as executor:
-            futures = {executor.submit(process_stock, row['Code'], row['Name'], row.get('Market', '-'), row.get('Sector', '-'), target_date, date_1m, date_3m, date_6m, date_1y): row for row in target_stocks}
+            futures = {executor.submit(process_stock, row['Code'], row['Name'], row.get('Market', '-'), row.get('Sector', '-'), target_date_dt, date_1m, date_3m, date_6m, date_1y): row for row in target_stocks}
             
             for future in concurrent.futures.as_completed(futures):
                 completed += 1
