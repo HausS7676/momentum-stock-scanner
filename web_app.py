@@ -15,8 +15,12 @@ st.markdown("""
 
 if st.button("🚀 검색 시작 (클릭)"):
     with st.spinner("한국거래소(KRX) 전체 종목 데이터를 분석하고 있습니다... (약 3~5분 소요)"):
-        # 1. 한국거래소 종목 코드 가져오기 (에러가 나던 KRX 대신 안정적인 KRX-DESC 사용)
-        krx = fdr.StockListing('KRX-DESC')
+        # 1. 종목 코드 가져오기 (클라우드 IP 차단 방지를 위해 로컬 CSV 파일 사용)
+        try:
+            krx = pd.read_csv('tickers.csv', dtype=str)
+        except FileNotFoundError:
+            krx = fdr.StockListing('KRX-DESC') # 로컬 테스트용 폴백
+            
         if 'Market' in krx.columns:
             krx = krx[krx['Market'].isin(['KOSPI', 'KOSDAQ'])]
         
