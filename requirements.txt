@@ -3,3 +3,5 @@ pandas
 tqdm
 python-dateutil
 streamlit
+beautifulsoup4
+requests
