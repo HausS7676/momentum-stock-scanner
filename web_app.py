@@ -24,12 +24,13 @@ with col2:
 with col3:
     div_yield_target = st.slider("💰 최소 배당수익률 (고배당 기준 %)", 0, 10, 5)
 
+@st.cache_data(show_spinner=False, ttl=3600*24)
 def get_supply_demand_and_dividend(code, target_date_str):
     headers = {'User-Agent': 'Mozilla/5.0', 'Connection': 'close'}
     div_val = 'N/A'
     div_num = 0.0
-    inst_sum = 0
-    frgn_sum = 0
+    inst_3d = inst_5d = inst_10d = 0
+    frgn_3d = frgn_5d = frgn_10d = 0
     total_supply = 0
     
     # 1. 배당수익률 (정규식 사용으로 메모리 및 속도 10배 최적화)
@@ -41,33 +42,54 @@ def get_supply_demand_and_dividend(code, target_date_str):
             div_num = float(div_val)
     except: pass
     
-    # 2. 수급 (기준일로부터 과거 3일 합산)
+    # 2. 수급 (기준일로부터 과거 3일, 5일, 10일 합산)
     try:
+        all_dfs = []
         for page in [1, 2]:
             res2 = requests.get(f'https://finance.naver.com/item/frgn.naver?code={code}&page={page}', headers=headers, timeout=3)
             dfs = pd.read_html(StringIO(res2.text), encoding='euc-kr')
             if len(dfs) > 3:
                 df = dfs[3].dropna()
-                df['date_dt'] = pd.to_datetime(df.iloc[:, 0], format='%Y.%m.%d', errors='coerce')
-                valid_df = df[df['date_dt'] <= pd.to_datetime(target_date_str)]
+                all_dfs.append(df)
                 
-                if not valid_df.empty:
-                    idx = valid_df.index[0]
-                    sub_df = valid_df.loc[idx:idx+2]
-                    if len(sub_df) > 0:
-                        inst_sum = int(sub_df.iloc[:, 5].astype(float).sum())
-                        frgn_sum = int(sub_df.iloc[:, 6].astype(float).sum())
-                        total_supply = inst_sum + frgn_sum
-                    break
+        if all_dfs:
+            combined_df = pd.concat(all_dfs, ignore_index=True)
+            combined_df['date_dt'] = pd.to_datetime(combined_df.iloc[:, 0], format='%Y.%m.%d', errors='coerce')
+            valid_df = combined_df[combined_df['date_dt'] <= pd.to_datetime(target_date_str)]
+            
+            if not valid_df.empty:
+                idx = valid_df.index[0]
+                
+                df_3d = valid_df.loc[idx:idx+2]
+                df_5d = valid_df.loc[idx:idx+4]
+                df_10d = valid_df.loc[idx:idx+9]
+                
+                inst_3d = int(df_3d.iloc[:, 5].astype(float).sum()) if len(df_3d) > 0 else 0
+                frgn_3d = int(df_3d.iloc[:, 6].astype(float).sum()) if len(df_3d) > 0 else 0
+                
+                inst_5d = int(df_5d.iloc[:, 5].astype(float).sum()) if len(df_5d) > 0 else 0
+                frgn_5d = int(df_5d.iloc[:, 6].astype(float).sum()) if len(df_5d) > 0 else 0
+                
+                inst_10d = int(df_10d.iloc[:, 5].astype(float).sum()) if len(df_10d) > 0 else 0
+                frgn_10d = int(df_10d.iloc[:, 6].astype(float).sum()) if len(df_10d) > 0 else 0
+                
+                total_supply = inst_10d + frgn_10d
     except: pass
     
-    return div_val, div_num, inst_sum, frgn_sum, total_supply
+    return div_val, div_num, inst_3d, inst_5d, inst_10d, frgn_3d, frgn_5d, frgn_10d, total_supply
+
+@st.cache_data(show_spinner=False, ttl=3600*24)
+def get_price_data(code, start_date_str, end_date_str):
+    try:
+        return fdr.DataReader(code, start_date_str, end_date_str)
+    except:
+        return None
 
 def process_stock(code, name, market, sector, target_date_dt, date_1m, date_3m, date_6m, date_1y):
     try:
-        # 가격 데이터 추출
-        df = fdr.DataReader(code, date_1y.strftime('%Y-%m-%d'), target_date_dt.strftime('%Y-%m-%d'))
-        if len(df) < 60: return None
+        # 가격 데이터 추출 (캐싱 적용)
+        df = get_price_data(code, date_1y.strftime('%Y-%m-%d'), target_date_dt.strftime('%Y-%m-%d'))
+        if df is None or len(df) < 60: return None
             
         current_price = int(df['Close'].iloc[-1])
         price_1m = df[df.index <= date_1m]['Close'].iloc[-1] if len(df[df.index <= date_1m]) > 0 else df['Close'].iloc[0]
@@ -87,10 +109,10 @@ def process_stock(code, name, market, sector, target_date_dt, date_1m, date_3m, 
             return None
             
         # 배당, 수급 스크래핑
-        div_val, div_num, inst_sum, frgn_sum, total_supply = get_supply_demand_and_dividend(code, target_date_dt)
+        div_val, div_num, inst_3d, inst_5d, inst_10d, frgn_3d, frgn_5d, frgn_10d, total_supply = get_supply_demand_and_dividend(code, target_date_dt)
         
         is_dividend = (div_num >= div_yield_target)
-        is_supply = (total_supply >= 50000) or (inst_sum > 0 and frgn_sum > 0 and total_supply > 0)
+        is_supply = (inst_10d >= 50000) or (inst_3d > 0 and frgn_3d > 0 and (inst_3d+frgn_3d) > 0)
         
         if is_momentum or is_dividend or is_supply:
             condition_type = '수급주'
@@ -106,9 +128,12 @@ def process_stock(code, name, market, sector, target_date_dt, date_1m, date_3m, 
                 '시장': market,
                 '업종': str(sector) if pd.notnull(sector) else '-',
                 '기준일주가': current_price,
-                '수급점수(외인+기관)': total_supply,
-                '외인순매수(3일)': frgn_sum,
-                '기관순매수(3일)': inst_sum,
+                '기관순매수(10일)': inst_10d,
+                '기관순매수(5일)': inst_5d,
+                '기관순매수(3일)': inst_3d,
+                '외인순매수(10일)': frgn_10d,
+                '외인순매수(5일)': frgn_5d,
+                '외인순매수(3일)': frgn_3d,
                 '배당수익률(%)': div_val,
                 '1개월(%)': round(ret_1m, 2),
                 '3개월(%)': round(ret_3m, 2),
@@ -163,16 +188,20 @@ if st.button("🚀 멀티팩터 검색 시작 (클릭)"):
         
         results_df = pd.DataFrame(results)
         if not results_df.empty:
-            results_df = results_df.sort_values(by='수급점수(외인+기관)', ascending=False)
+            # 기관 순매수(10일, 5일, 3일)을 주요 지표로, 외인 순매수를 보조 지표로 하여 내림차순 정렬
+            results_df = results_df.sort_values(by=['기관순매수(10일)', '기관순매수(5일)', '기관순매수(3일)', '외인순매수(10일)'], ascending=[False, False, False, False])
             
-            results_df['수급점수(외인+기관)'] = results_df['수급점수(외인+기관)'].apply(lambda x: f"{x:,}")
-            results_df['외인순매수(3일)'] = results_df['외인순매수(3일)'].apply(lambda x: f"{x:,}")
-            results_df['기관순매수(3일)'] = results_df['기관순매수(3일)'].apply(lambda x: f"{x:,}")
+            # 가독성을 위해 포맷팅
+            for col in ['기관순매수(10일)', '기관순매수(5일)', '기관순매수(3일)', '외인순매수(10일)', '외인순매수(5일)', '외인순매수(3일)']:
+                results_df[col] = results_df[col].apply(lambda x: f"{x:,}")
             
-            cols = ['종목코드', '종목명', '분류', '시장', '업종', '기준일주가', '수급점수(외인+기관)', '외인순매수(3일)', '기관순매수(3일)', '배당수익률(%)', '1개월(%)', '3개월(%)', '6개월(%)', '1년(%)']
+            cols = ['종목코드', '종목명', '분류', '시장', '업종', '기준일주가', 
+                    '기관순매수(10일)', '기관순매수(5일)', '기관순매수(3일)', 
+                    '외인순매수(10일)', '외인순매수(5일)', '외인순매수(3일)', 
+                    '배당수익률(%)', '1개월(%)', '3개월(%)', '6개월(%)', '1년(%)']
             results_df = results_df[cols]
             
-            st.success(f"🎉 총 {len(results_df)}개의 상승 유력 주도주를 찾았습니다! (수급 강도 순으로 정렬됨)")
+            st.success(f"🎉 총 {len(results_df)}개의 상승 유력 주도주를 찾았습니다! (기관 수급 우선 정렬됨)")
             st.dataframe(results_df, use_container_width=True)
         else:
             st.warning("해당 기준일에 조건을 만족하는 종목이 없습니다.")
