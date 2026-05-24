@@ -48,7 +48,7 @@ def get_supply_demand_and_dividend(code, target_date_str):
             dfs = pd.read_html(StringIO(res2.text), encoding='euc-kr')
             if len(dfs) > 3:
                 df = dfs[3].dropna()
-                df['date_dt'] = pd.to_datetime(df['날짜'], format='%Y.%m.%d', errors='coerce')
+                df['date_dt'] = pd.to_datetime(df.iloc[:, 0], format='%Y.%m.%d', errors='coerce')
                 valid_df = df[df['date_dt'] <= pd.to_datetime(target_date_str)]
                 
                 if not valid_df.empty:
